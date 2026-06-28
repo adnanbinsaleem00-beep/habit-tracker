@@ -1,29 +1,34 @@
 const http = require('http');
 const crypto = require('crypto');
-const Database = require('better-sqlite3');
+const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const { URL } = require('url');
 
-const db = new Database('habits.db');
+// Connect to our PostgreSQL database using the URL Render gives us.
+// This URL is provided as an environment variable called DATABASE_URL.
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false },
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    password TEXT NOT NULL
-  )
-`);
+async function setupDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      username TEXT NOT NULL UNIQUE,
+      password TEXT NOT NULL
+    )
+  `);
 
-// Habits now have a user_id column, linking each habit to its owner.
-db.exec(`
-  CREATE TABLE IF NOT EXISTS habits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    name TEXT NOT NULL,
-    done INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  )
-`);
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS habits (
+      id SERIAL PRIMARY KEY,
+      user_id INTEGER NOT NULL REFERENCES users(id),
+      name TEXT NOT NULL,
+      done BOOLEAN NOT NULL DEFAULT false
+    )
+  `);
+}
 
 const sessions = {};
 
@@ -52,13 +57,14 @@ function getUsernameFromRequest(req) {
   return null;
 }
 
-function getUserByUsername(username) {
-  return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+async function getUserByUsername(username) {
+  const result = await pool.query('SELECT * FROM users WHERE username = $1', [username]);
+  return result.rows[0] || null;
 }
 
-// Renders the habit list for a SPECIFIC user only.
-function renderHabitList(userId) {
-  const habits = db.prepare('SELECT * FROM habits WHERE user_id = ?').all(userId);
+async function renderHabitList(userId) {
+  const result = await pool.query('SELECT * FROM habits WHERE user_id = $1 ORDER BY id', [userId]);
+  const habits = result.rows;
   if (habits.length === 0) {
     return '<p>No habits yet. Add one below!</p>';
   }
@@ -149,11 +155,11 @@ function renderLoggedOutHomePage() {
   `);
 }
 
-function renderLoggedInHomePage(user) {
+async function renderLoggedInHomePage(user) {
   return wrapPage('My Habit Tracker', `
     <div class="topbar">Logged in as <strong>${user.username}</strong> | <a href="/logout">Log Out</a></div>
     <h1>My Habit Tracker</h1>
-    ${renderHabitList(user.id)}
+    ${await renderHabitList(user.id)}
     <form class="inline" method="POST" action="/habits/add">
       <input type="text" name="name" placeholder="New habit name" required />
       <button type="submit">Add</button>
@@ -215,112 +221,119 @@ function redirectTo(res, location) {
   res.end();
 }
 
-const server = http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://localhost:3000');
-  const username = getUsernameFromRequest(req);
-  const currentUser = username ? getUserByUsername(username) : null;
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, 'http://localhost:3000');
+    const username = getUsernameFromRequest(req);
+    const currentUser = username ? await getUserByUsername(username) : null;
 
-  // Add a new habit (must be logged in)
-  if (req.method === 'POST' && url.pathname === '/habits/add') {
-    readFormData(req, (params) => {
-      if (!currentUser) {
-        redirectTo(res, '/login');
-        return;
-      }
-      const name = params.get('name');
-      if (name && name.trim()) {
-        db.prepare('INSERT INTO habits (user_id, name, done) VALUES (?, ?, 0)').run(currentUser.id, name.trim());
-      }
-      redirectTo(res, '/');
-    });
-    return;
-  }
-
-  // Toggle a habit (must own the habit)
-  if (req.method === 'POST' && url.pathname.startsWith('/toggle/')) {
-    const id = url.pathname.split('/toggle/')[1];
-    if (currentUser) {
-      const habit = db.prepare('SELECT * FROM habits WHERE id = ? AND user_id = ?').get(id, currentUser.id);
-      if (habit) {
-        const newDone = habit.done ? 0 : 1;
-        db.prepare('UPDATE habits SET done = ? WHERE id = ?').run(newDone, id);
-      }
+    if (req.method === 'POST' && url.pathname === '/habits/add') {
+      readFormData(req, async (params) => {
+        if (!currentUser) {
+          redirectTo(res, '/login');
+          return;
+        }
+        const name = params.get('name');
+        if (name && name.trim()) {
+          await pool.query('INSERT INTO habits (user_id, name, done) VALUES ($1, $2, false)', [currentUser.id, name.trim()]);
+        }
+        redirectTo(res, '/');
+      });
+      return;
     }
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
-    return;
-  }
 
-  if (req.method === 'GET' && url.pathname === '/signup') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(renderSignupPage());
-    return;
-  }
-
-  if (req.method === 'POST' && url.pathname === '/signup') {
-    readFormData(req, (params) => {
-      const newUsername = params.get('username');
-      const password = params.get('password');
-      if (!newUsername || !password) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(renderSignupPage('Please fill in both fields.'));
-        return;
+    if (req.method === 'POST' && url.pathname.startsWith('/toggle/')) {
+      const id = url.pathname.split('/toggle/')[1];
+      if (currentUser) {
+        const result = await pool.query('SELECT * FROM habits WHERE id = $1 AND user_id = $2', [id, currentUser.id]);
+        const habit = result.rows[0];
+        if (habit) {
+          await pool.query('UPDATE habits SET done = $1 WHERE id = $2', [!habit.done, id]);
+        }
       }
-      const existing = getUserByUsername(newUsername);
-      if (existing) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(renderSignupPage('That username is already taken.'));
-        return;
-      }
-      const hashedPassword = bcrypt.hashSync(password, 10);
-      db.prepare('INSERT INTO users (username, password) VALUES (?, ?)').run(newUsername, hashedPassword);
-      logUserInAndRedirect(res, newUsername, '/');
-    });
-    return;
-  }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+      return;
+    }
 
-  if (req.method === 'GET' && url.pathname === '/login') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(renderLoginPage());
-    return;
-  }
+    if (req.method === 'GET' && url.pathname === '/signup') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(renderSignupPage());
+      return;
+    }
 
-  if (req.method === 'POST' && url.pathname === '/login') {
-    readFormData(req, (params) => {
-      const loginUsername = params.get('username');
-      const password = params.get('password');
-      const user = getUserByUsername(loginUsername);
-      if (!user || !bcrypt.compareSync(password, user.password)) {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(renderLoginPage('Incorrect username or password.'));
-        return;
-      }
-      logUserInAndRedirect(res, loginUsername, '/');
-    });
-    return;
-  }
+    if (req.method === 'POST' && url.pathname === '/signup') {
+      readFormData(req, async (params) => {
+        const newUsername = params.get('username');
+        const password = params.get('password');
+        if (!newUsername || !password) {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(renderSignupPage('Please fill in both fields.'));
+          return;
+        }
+        const existing = await getUserByUsername(newUsername);
+        if (existing) {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(renderSignupPage('That username is already taken.'));
+          return;
+        }
+        const hashedPassword = bcrypt.hashSync(password, 10);
+        await pool.query('INSERT INTO users (username, password) VALUES ($1, $2)', [newUsername, hashedPassword]);
+        logUserInAndRedirect(res, newUsername, '/');
+      });
+      return;
+    }
 
-  if (req.method === 'GET' && url.pathname === '/logout') {
-    const cookies = parseCookies(req);
-    delete sessions[cookies.sessionId];
-    res.writeHead(302, {
-      'Set-Cookie': 'sessionId=; HttpOnly; Path=/; Max-Age=0',
-      'Location': '/',
-    });
-    res.end();
-    return;
-  }
+    if (req.method === 'GET' && url.pathname === '/login') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(renderLoginPage());
+      return;
+    }
 
-  if (req.method === 'GET' && url.pathname === '/') {
-    res.writeHead(200, { 'Content-Type': 'text/html' });
-    res.end(currentUser ? renderLoggedInHomePage(currentUser) : renderLoggedOutHomePage());
-    return;
-  }
+    if (req.method === 'POST' && url.pathname === '/login') {
+      readFormData(req, async (params) => {
+        const loginUsername = params.get('username');
+        const password = params.get('password');
+        const user = await getUserByUsername(loginUsername);
+        if (!user || !bcrypt.compareSync(password, user.password)) {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(renderLoginPage('Incorrect username or password.'));
+          return;
+        }
+        logUserInAndRedirect(res, loginUsername, '/');
+      });
+      return;
+    }
 
-  res.writeHead(404, { 'Content-Type': 'text/plain' });
-  res.end('Page not found');
+    if (req.method === 'GET' && url.pathname === '/logout') {
+      const cookies = parseCookies(req);
+      delete sessions[cookies.sessionId];
+      res.writeHead(302, {
+        'Set-Cookie': 'sessionId=; HttpOnly; Path=/; Max-Age=0',
+        'Location': '/',
+      });
+      res.end();
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(currentUser ? await renderLoggedInHomePage(currentUser) : renderLoggedOutHomePage());
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Page not found');
+  } catch (err) {
+    console.error(err);
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('Something went wrong');
+  }
 });
 
-server.listen(3000, () => {
-  console.log('Server running! Open your browser to http://localhost:3000');
+const PORT = process.env.PORT || 3000;
+setupDatabase().then(() => {
+  server.listen(PORT, () => {
+    console.log('Server running on port ' + PORT);
+  });
 });
