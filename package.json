@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "bcrypt": "^6.0.0",
+    "better-sqlite3": "^12.11.1",
+    "cookie": "^2.0.0"
+  }
+}
