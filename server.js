@@ -105,7 +105,10 @@ async function renderHabitList(userId) {
           <input type="checkbox" ${checked} onchange="toggleHabit(${habit.id})" />
           <span>${habit.name}</span>
         </label>
-        <div class="habit-meta">Completed ${totalCount} day${totalCount === '1' ? '' : 's'} total</div>
+        <div class="habit-meta">
+          Completed ${totalCount} day${totalCount === '1' ? '' : 's'} total
+          <button class="delete-btn" onclick="deleteHabit(${habit.id})">Delete</button>
+        </div>
       </li>
     `;
   }));
@@ -244,6 +247,11 @@ async function renderLoggedInHomePage(user) {
       function toggleHabit(id) {
         fetch('/toggle/' + id, { method: 'POST' });
       }
+      function deleteHabit(id) {
+        if (confirm('Delete this habit? This cannot be undone.')) {
+          fetch('/habits/delete/' + id, { method: 'POST' }).then(() => location.reload());
+        }
+      }
     </script>
   `);
 }
@@ -341,6 +349,16 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname.startsWith('/habits/delete/')) {
+      const id = url.pathname.split('/habits/delete/')[1];
+      if (currentUser) {
+        await pool.query('DELETE FROM completions WHERE habit_id = $1', [id]);
+        await pool.query('DELETE FROM habits WHERE id = $1 AND user_id = $2', [id, currentUser.id]);
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+      return;
+    }
     if (req.method === 'GET' && url.pathname === '/signup') {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(renderSignupPage());
