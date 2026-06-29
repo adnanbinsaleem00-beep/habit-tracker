@@ -97,8 +97,26 @@ async function renderHabitList(userId) {
       [habit.id]
     );
     const totalCount = countResult.rows[0].count;
+    const allDatesResult = await pool.query(
+      'SELECT completed_on FROM completions WHERE habit_id = $1 ORDER BY completed_on DESC',
+      [habit.id]
+    );
+    const completedDates = new Set(allDatesResult.rows.map(r => r.completed_on.toISOString().split('T')[0]));
+
+    let streak = 0;
+    let checkDate = new Date();
+    while (true) {
+      const dateStr = checkDate.toISOString().split('T')[0];
+      if (completedDates.has(dateStr)) {
+        streak++;
+        checkDate.setDate(checkDate.getDate() - 1);
+      } else {
+        break;
+      }
+    }
 
     const checked = doneToday ? 'checked' : '';
+    const streakText = streak > 0 ? `🔥 ${streak} day${streak === 1 ? '' : 's'} streak` : 'No streak yet';
     return `
       <li class="habit">
         <label>
@@ -106,11 +124,11 @@ async function renderHabitList(userId) {
           <span>${habit.name}</span>
         </label>
         <div class="habit-meta">
-          Completed ${totalCount} day${totalCount === '1' ? '' : 's'} total
+          ${streakText} · ${totalCount} total
           <button class="delete-btn" onclick="deleteHabit(${habit.id})">Delete</button>
         </div>
       </li>
-    `;
+    `;  
   }));
 
   return `<ul class="habit-list">${rows.join('')}</ul>`;
