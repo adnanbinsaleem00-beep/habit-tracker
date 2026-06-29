@@ -10,6 +10,9 @@ const pool = new Pool({
 });
 
 async function setupDatabase() {
+  await pool.query('DROP TABLE IF EXISTS completions');
+  await pool.query('DROP TABLE IF EXISTS habits CASCADE');
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -22,10 +25,22 @@ async function setupDatabase() {
     CREATE TABLE IF NOT EXISTS habits (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id),
-      name TEXT NOT NULL,
-      done BOOLEAN NOT NULL DEFAULT false
+      name TEXT NOT NULL
     )
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS completions (
+      id SERIAL PRIMARY KEY,
+      habit_id INTEGER NOT NULL REFERENCES habits(id),
+      completed_on DATE NOT NULL,
+      UNIQUE (habit_id, completed_on)
+    )
+  `);
+}
+
+function todayDateString() {
+  return new Date().toISOString().split('T')[0];
 }
 
 const sessions = {};
@@ -61,26 +76,41 @@ async function getUserByUsername(username) {
 }
 
 async function renderHabitList(userId) {
-  const result = await pool.query('SELECT * FROM habits WHERE user_id = $1 ORDER BY id', [userId]);
-  const habits = result.rows;
+  const today = todayDateString();
+
+  const habitsResult = await pool.query('SELECT * FROM habits WHERE user_id = $1 ORDER BY id', [userId]);
+  const habits = habitsResult.rows;
+
   if (habits.length === 0) {
     return '<p>No habits yet. Add one below!</p>';
   }
-  return `
-    <ul class="habit-list">
-      ${habits.map((habit) => {
-        const checked = habit.done ? 'checked' : '';
-        return `
-          <li class="habit">
-            <label>
-              <input type="checkbox" ${checked} onchange="toggleHabit(${habit.id})" />
-              <span>${habit.name}</span>
-            </label>
-          </li>
-        `;
-      }).join('')}
-    </ul>
-  `;
+
+  const rows = await Promise.all(habits.map(async (habit) => {
+    const todayResult = await pool.query(
+      'SELECT * FROM completions WHERE habit_id = $1 AND completed_on = $2',
+      [habit.id, today]
+    );
+    const doneToday = todayResult.rows.length > 0;
+
+    const countResult = await pool.query(
+      'SELECT COUNT(*) as count FROM completions WHERE habit_id = $1',
+      [habit.id]
+    );
+    const totalCount = countResult.rows[0].count;
+
+    const checked = doneToday ? 'checked' : '';
+    return `
+      <li class="habit">
+        <label>
+          <input type="checkbox" ${checked} onchange="toggleHabit(${habit.id})" />
+          <span>${habit.name}</span>
+        </label>
+        <div class="habit-meta">Completed ${totalCount} day${totalCount === '1' ? '' : 's'} total</div>
+      </li>
+    `;
+  }));
+
+  return `<ul class="habit-list">${rows.join('')}</ul>`;
 }
 
 function wrapPage(title, bodyHtml) {
@@ -103,8 +133,13 @@ function wrapPage(title, bodyHtml) {
           h1 {
             font-size: 26px;
             font-weight: 700;
-            margin-bottom: 28px;
+            margin-bottom: 6px;
             letter-spacing: -0.3px;
+          }
+          .date-label {
+            color: #6b6c74;
+            font-size: 14px;
+            margin-bottom: 24px;
           }
           ul.habit-list { list-style: none; padding: 0; margin: 0; }
           li.habit {
@@ -121,6 +156,12 @@ function wrapPage(title, bodyHtml) {
             gap: 14px;
             cursor: pointer;
             font-size: 16px;
+          }
+          .habit-meta {
+            margin-top: 8px;
+            margin-left: 34px;
+            font-size: 12px;
+            color: #6b6c74;
           }
           input[type="checkbox"] {
             width: 20px;
@@ -187,9 +228,13 @@ function renderLoggedOutHomePage() {
 }
 
 async function renderLoggedInHomePage(user) {
+  const today = new Date();
+  const dateLabel = today.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+
   return wrapPage('My Habit Tracker', `
     <div class="topbar">Logged in as <strong>${user.username}</strong> | <a href="/logout">Log Out</a></div>
     <h1>My Habit Tracker</h1>
+    <div class="date-label">${dateLabel}</div>
     ${await renderHabitList(user.id)}
     <form class="inline" method="POST" action="/habits/add">
       <input type="text" name="name" placeholder="New habit name" required />
@@ -266,7 +311,7 @@ const server = http.createServer(async (req, res) => {
         }
         const name = params.get('name');
         if (name && name.trim()) {
-          await pool.query('INSERT INTO habits (user_id, name, done) VALUES ($1, $2, false)', [currentUser.id, name.trim()]);
+          await pool.query('INSERT INTO habits (user_id, name) VALUES ($1, $2)', [currentUser.id, name.trim()]);
         }
         redirectTo(res, '/');
       });
@@ -276,10 +321,19 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && url.pathname.startsWith('/toggle/')) {
       const id = url.pathname.split('/toggle/')[1];
       if (currentUser) {
-        const result = await pool.query('SELECT * FROM habits WHERE id = $1 AND user_id = $2', [id, currentUser.id]);
-        const habit = result.rows[0];
+        const habitResult = await pool.query('SELECT * FROM habits WHERE id = $1 AND user_id = $2', [id, currentUser.id]);
+        const habit = habitResult.rows[0];
         if (habit) {
-          await pool.query('UPDATE habits SET done = $1 WHERE id = $2', [!habit.done, id]);
+          const today = todayDateString();
+          const existing = await pool.query(
+            'SELECT * FROM completions WHERE habit_id = $1 AND completed_on = $2',
+            [id, today]
+          );
+          if (existing.rows.length > 0) {
+            await pool.query('DELETE FROM completions WHERE habit_id = $1 AND completed_on = $2', [id, today]);
+          } else {
+            await pool.query('INSERT INTO completions (habit_id, completed_on) VALUES ($1, $2)', [id, today]);
+          }
         }
       }
       res.writeHead(200, { 'Content-Type': 'text/plain' });
