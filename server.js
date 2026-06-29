@@ -116,7 +116,7 @@ async function renderHabitList(userId) {
     }
 
     const checked = doneToday ? 'checked' : '';
-    const streakText = streak > 0 ? `🔥 ${streak} day${streak === 1 ? '' : 's'} streak` : 'No streak yet';
+    const streakText = streak > 0 ? ` ${streak} day${streak === 1 ? '' : 's'} streak` : 'No streak yet';
     return `
       <li class="habit">
         <label>
