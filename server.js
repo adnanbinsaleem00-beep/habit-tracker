@@ -4,8 +4,6 @@ const { Pool } = require('pg');
 const bcrypt = require('bcrypt');
 const { URL } = require('url');
 
-// Connect to our PostgreSQL database using the URL Render gives us.
-// This URL is provided as an environment variable called DATABASE_URL.
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
@@ -116,10 +114,6 @@ function wrapPage(title, bodyHtml) {
             padding: 16px 18px;
             margin-bottom: 12px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-            transition: border-color 0.15s ease;
-          }
-          li.habit:hover {
-            border-color: #3a3b42;
           }
           li.habit label {
             display: flex;
@@ -146,10 +140,6 @@ function wrapPage(title, bodyHtml) {
             color: #e8e8ea;
             flex: 1;
             outline: none;
-            transition: border-color 0.15s ease;
-          }
-          input[type="text"]:focus, input[type="password"]:focus {
-            border-color: #6c5ce7;
           }
           input::placeholder { color: #6b6c74; }
           button {
@@ -161,7 +151,6 @@ function wrapPage(title, bodyHtml) {
             border: none;
             border-radius: 10px;
             cursor: pointer;
-            transition: background 0.15s ease;
           }
           button:hover { background: #5a4bd4; }
           .error {
@@ -188,6 +177,81 @@ function wrapPage(title, bodyHtml) {
     </html>
   `;
 }
+
+function renderLoggedOutHomePage() {
+  return wrapPage('My Habit Tracker', `
+    <div class="topbar"><a href="/signup">Sign Up</a> | <a href="/login">Log In</a></div>
+    <h1>My Habit Tracker</h1>
+    <p>Sign up or log in to start tracking your habits.</p>
+  `);
+}
+
+async function renderLoggedInHomePage(user) {
+  return wrapPage('My Habit Tracker', `
+    <div class="topbar">Logged in as <strong>${user.username}</strong> | <a href="/logout">Log Out</a></div>
+    <h1>My Habit Tracker</h1>
+    ${await renderHabitList(user.id)}
+    <form class="inline" method="POST" action="/habits/add">
+      <input type="text" name="name" placeholder="New habit name" required />
+      <button type="submit">Add</button>
+    </form>
+    <script>
+      function toggleHabit(id) {
+        fetch('/toggle/' + id, { method: 'POST' });
+      }
+    </script>
+  `);
+}
+
+function renderSignupPage(error) {
+  return wrapPage('Sign Up', `
+    <h1>Sign Up</h1>
+    ${error ? `<p class="error">${error}</p>` : ''}
+    <form method="POST" action="/signup">
+      <input type="text" name="username" placeholder="Username" required />
+      <input type="password" name="password" placeholder="Password" required />
+      <button type="submit">Create Account</button>
+    </form>
+    <p><a href="/">Back home</a></p>
+  `);
+}
+
+function renderLoginPage(error) {
+  return wrapPage('Log In', `
+    <h1>Log In</h1>
+    ${error ? `<p class="error">${error}</p>` : ''}
+    <form method="POST" action="/login">
+      <input type="text" name="username" placeholder="Username" required />
+      <input type="password" name="password" placeholder="Password" required />
+      <button type="submit">Log In</button>
+    </form>
+    <p><a href="/">Back home</a></p>
+  `);
+}
+
+function readFormData(req, callback) {
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => {
+    const params = new URLSearchParams(body);
+    callback(params);
+  });
+}
+
+function logUserInAndRedirect(res, username, redirectTo) {
+  const sessionId = createSession(username);
+  res.writeHead(302, {
+    'Set-Cookie': `sessionId=${sessionId}; HttpOnly; Path=/`,
+    'Location': redirectTo,
+  });
+  res.end();
+}
+
+function redirectTo(res, location) {
+  res.writeHead(302, { 'Location': location });
+  res.end();
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://localhost:3000');
@@ -293,8 +357,10 @@ const server = http.createServer(async (req, res) => {
     res.end('Page not found');
   } catch (err) {
     console.error(err);
-    res.writeHead(500, { 'Content-Type': 'text/plain' });
-    res.end('Something went wrong');
+    if (!res.headersSent) {
+      res.writeHead(500, { 'Content-Type': 'text/plain' });
+      res.end('Something went wrong');
+    }
   }
 });
 
