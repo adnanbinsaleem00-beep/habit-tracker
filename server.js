@@ -188,3 +188,135 @@ function wrapPage(title, bodyHtml) {
     </html>
   `;
 }
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, 'http://localhost:3000');
+    const username = getUsernameFromRequest(req);
+    const currentUser = username ? await getUserByUsername(username) : null;
+
+    if (req.method === 'POST' && url.pathname === '/habits/add') {
+      readFormData(req, async (params) => {
+        if (!currentUser) {
+          redirectTo(res, '/login');
+          return;
+        }
+        const name = params.get('name');
+        if (name && name.trim()) {
+          await pool.query('INSERT INTO habits (user_id, name, done) VALUES ($1, $2, false)', [currentUser.id, name.trim()]);
+        }
+        redirectTo(res, '/');
+      });
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname.startsWith('/toggle/')) {
+      const id = url.pathname.split('/toggle/')[1];
+      if (currentUser) {
+        const result = await pool.query('SELECT * FROM habits WHERE id = $1 AND user_id = $2', [id, currentUser.id]);
+        const habit = result.rows[0];
+        if (habit) {
+          await pool.query('UPDATE habits SET done = $1 WHERE id = $2', [!habit.done, id]);
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('ok');
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/signup') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(renderSignupPage());
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/signup') {
+      readFormData(req, async (params) => {
+        const newUsername = params.get('username');
+        const password = params.get('password');
+        if (!newUsername || !password) {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(renderSignupPage('Please fill in both fields.'));
+          return;
+        }
+        const existing = await getUserByUsername(newUsername);
+        if (existing) {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(renderSignupPage('That username is already taken.'));
+          return;
+        }
+        const hashedPassword = bcrypt.hashSync(password, 10);
+        await pool.query('INSERT INTO users (username, password) VALUES ($1, $2)', [newUsername, hashedPassword]);
+        logUserInAndRedirect(res, newUsername, '/');
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/login') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(renderLoginPage());
+      return;
+    }
+
+    if (req.method === 'POST' && url.pathname === '/login') {
+      readFormData(req, async (params) => {
+        const loginUsername = params.get('username');
+        const password = params.get('password');
+        const user = await getUserByUsername(loginUsername);
+        if (!user || !bcrypt.compareSync(password, user.password)) {
+          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.end(renderLoginPage('Incorrect username or password.'));
+          return;
+        }
+        logUserInAndRedirect(res, loginUsername, '/');
+      });
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/logout') {
+      const cookies = parseCookies(req);
+      delete sessions[cookies.sessionId];
+      res.writeHead(302, {
+        'Set-Cookie': 'sessionId=; HttpOnly; Path=/; Max-Age=0',
+        'Location': '/',
+      });
+      res.end();
+      return;
+    }
+
+    if (req.method === 'GET' && url.pathname === '/') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(currentUser ? await renderLoggedInHomePage(currentUser) : renderLoggedOutHomePage());
+      return;
+    }
+
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Page not found');
+  } catch (err) {
+    console.error(err);
+    res.writeHead(500, { 'Content-Type': 'text/plain' });
+    res.end('Something went wrong');
+  }
+});
+
+const PORT = process.env.PORT || 3000;
+
+async function startServer() {
+  let connected = false;
+  let attempts = 0;
+  while (!connected && attempts < 10) {
+    try {
+      await setupDatabase();
+      connected = true;
+    } catch (err) {
+      attempts++;
+      console.log('Database not ready yet, retrying... (' + attempts + '/10)');
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+
+  server.listen(PORT, () => {
+    console.log('Server running on port ' + PORT);
+  });
+}
+
+startServer();
