@@ -116,7 +116,7 @@ async function renderHabitList(userId) {
     }
 
     const checked = doneToday ? 'checked' : '';
-    const streakText = streak > 0 ? ` ${streak} day${streak === 1 ? '' : 's'} streak` : 'No streak yet';
+    const streakText = streak > 0 ? `🔥 ${streak} day${streak === 1 ? '' : 's'} streak` : 'No streak yet';
     return `
       <li class="habit">
         <label>
@@ -378,7 +378,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/signup') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(renderSignupPage());
       return;
     }
@@ -388,13 +388,13 @@ const server = http.createServer(async (req, res) => {
         const newUsername = params.get('username');
         const password = params.get('password');
         if (!newUsername || !password) {
-          res.writeHead(200, { 'Content-Type': 'text/html' });
+         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(renderSignupPage('Please fill in both fields.'));
           return;
         }
         const existing = await getUserByUsername(newUsername);
         if (existing) {
-          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(renderSignupPage('That username is already taken.'));
           return;
         }
@@ -406,7 +406,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/login') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(renderLoginPage());
       return;
     }
@@ -417,7 +417,7 @@ const server = http.createServer(async (req, res) => {
         const password = params.get('password');
         const user = await getUserByUsername(loginUsername);
         if (!user || !bcrypt.compareSync(password, user.password)) {
-          res.writeHead(200, { 'Content-Type': 'text/html' });
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(renderLoginPage('Incorrect username or password.'));
           return;
         }
@@ -438,7 +438,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (req.method === 'GET' && url.pathname === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(currentUser ? await renderLoggedInHomePage(currentUser) : renderLoggedOutHomePage());
       return;
     }
