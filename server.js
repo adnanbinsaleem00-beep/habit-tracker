@@ -121,7 +121,7 @@ async function renderHabitList(userId) {
       <li class="habit">
         <label>
           <input type="checkbox" ${checked} onchange="toggleHabit(${habit.id})" />
-          <span>${habit.name}</span>
+         <span class="habit-name" onclick="editHabitName(${habit.id}, '${habit.name.replace(/'/g, "\\'")}')">${habit.name}</span>
         </label>
         <div class="habit-meta">
           ${streakText} · ${totalCount} total
@@ -269,6 +269,15 @@ async function renderLoggedInHomePage(user) {
         if (confirm('Delete this habit? This cannot be undone.')) {
           fetch('/habits/delete/' + id, { method: 'POST' }).then(() => location.reload());
         }
+      }function editHabitName(id, currentName) {
+        const newName = prompt('Rename habit:', currentName);
+        if (newName && newName.trim() && newName.trim() !== currentName) {
+          fetch('/habits/rename/' + id, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: 'name=' + encodeURIComponent(newName.trim()),
+          }).then(() => location.reload());
+        }
       }
     </script>
   `);
@@ -367,6 +376,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && url.pathname.startsWith('/habits/rename/')) {
+      const id = url.pathname.split('/habits/rename/')[1];
+      readFormData(req, async (params) => {
+        const newName = params.get('name');
+        if (currentUser && newName && newName.trim()) {
+          await pool.query('UPDATE habits SET name = $1 WHERE id = $2 AND user_id = $3', [newName.trim(), id, currentUser.id]);
+        }
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('ok');
+      });
+      return;
+    }
     if (req.method === 'POST' && url.pathname.startsWith('/habits/delete/')) {
       const id = url.pathname.split('/habits/delete/')[1];
       if (currentUser) {
