@@ -10,9 +10,6 @@ const pool = new Pool({
 });
 
 async function setupDatabase() {
-  await pool.query('DROP TABLE IF EXISTS completions');
-  await pool.query('DROP TABLE IF EXISTS habits CASCADE');
-
   await pool.query(`
     CREATE TABLE IF NOT EXISTS users (
       id SERIAL PRIMARY KEY,
@@ -75,6 +72,8 @@ async function getUserByUsername(username) {
   return result.rows[0] || null;
 }
 
+const ACCENT_COLORS = ['#6c5ce7', '#00b894', '#0984e3', '#e17055', '#fd79a8', '#fdcb6e'];
+
 async function renderHabitList(userId) {
   const today = todayDateString();
 
@@ -82,15 +81,18 @@ async function renderHabitList(userId) {
   const habits = habitsResult.rows;
 
   if (habits.length === 0) {
-    return '<p>No habits yet. Add one below!</p>';
+    return { html: '<p>No habits yet. Add one below!</p>', doneCount: 0, totalCount: 0 };
   }
 
-  const rows = await Promise.all(habits.map(async (habit) => {
+  let doneCount = 0;
+
+  const rows = await Promise.all(habits.map(async (habit, index) => {
     const todayResult = await pool.query(
       'SELECT * FROM completions WHERE habit_id = $1 AND completed_on = $2',
       [habit.id, today]
     );
     const doneToday = todayResult.rows.length > 0;
+    if (doneToday) doneCount++;
 
     const countResult = await pool.query(
       'SELECT COUNT(*) as count FROM completions WHERE habit_id = $1',
@@ -116,22 +118,45 @@ async function renderHabitList(userId) {
     }
 
     const checked = doneToday ? 'checked' : '';
-    const streakText = streak > 0 ? `🔥 ${streak} day${streak === 1 ? '' : 's'} streak` : 'No streak yet';
+    const accent = ACCENT_COLORS[index % ACCENT_COLORS.length];
+    const streakHtml = streak > 0
+      ? `<span class="streak-badge">🔥 ${streak} day${streak === 1 ? '' : 's'} streak</span>`
+      : `<span class="streak-badge no-streak">No streak yet</span>`;
     return `
-      <li class="habit">
+      <li class="habit" style="--accent: ${accent};">
         <label>
           <input type="checkbox" ${checked} onchange="toggleHabit(${habit.id})" />
          <span class="habit-name" onclick="editHabitName(${habit.id}, '${habit.name.replace(/'/g, "\\'")}')">${habit.name}</span>
         </label>
         <div class="habit-meta">
-          ${streakText} · ${totalCount} total
+          ${streakHtml} · ${totalCount} total
           <button class="delete-btn" onclick="deleteHabit(${habit.id})">Delete</button>
         </div>
       </li>
     `;  
   }));
 
-  return `<ul class="habit-list">${rows.join('')}</ul>`;
+  return { html: `<ul class="habit-list">${rows.join('')}</ul>`, doneCount, totalCount: habits.length };
+}
+
+function renderProgressRing(doneCount, totalCount) {
+  const radius = 70;
+  const circumference = 2 * Math.PI * radius;
+  const fraction = totalCount > 0 ? doneCount / totalCount : 0;
+  const offset = circumference * (1 - fraction);
+
+  return `
+    <div class="progress-ring-wrap">
+      <svg width="180" height="180" viewBox="0 0 180 180">
+        <circle class="progress-ring-track" cx="90" cy="90" r="${radius}" />
+        <circle class="progress-ring-fill" cx="90" cy="90" r="${radius}"
+          stroke-dasharray="${circumference}"
+          stroke-dashoffset="${offset}" />
+      </svg>
+      <div class="progress-ring-label">${doneCount} / ${totalCount}</div>
+      <div class="progress-ring-sub">habits done today</div>
+    </div>
+  `;
 }
 
 function wrapPage(title, bodyHtml) {
@@ -161,11 +186,45 @@ function wrapPage(title, bodyHtml) {
             color: #6b6c74;
             font-size: 14px;
             margin-bottom: 24px;
+            text-align: center;
+          }
+          .progress-ring-wrap {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 8px 0 32px;
+          }
+          .progress-ring-wrap svg {
+            transform: rotate(-90deg);
+          }
+          .progress-ring-track {
+            fill: none;
+            stroke: #2a2b31;
+            stroke-width: 14;
+          }
+          .progress-ring-fill {
+            fill: none;
+            stroke: #6c5ce7;
+            stroke-width: 14;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.4s ease;
+          }
+          .progress-ring-label {
+            margin-top: -120px;
+            font-size: 34px;
+            font-weight: 800;
+            letter-spacing: -0.5px;
+          }
+          .progress-ring-sub {
+            margin-top: 38px;
+            font-size: 13px;
+            color: #8b8c94;
           }
           ul.habit-list { list-style: none; padding: 0; margin: 0; }
           li.habit {
             background: #1f2025;
             border: 1px solid #2a2b31;
+            border-left: 5px solid var(--accent, #6c5ce7);
             border-radius: 14px;
             padding: 16px 18px;
             margin-bottom: 12px;
@@ -182,6 +241,18 @@ function wrapPage(title, bodyHtml) {
             margin-top: 8px;
             margin-left: 34px;
             font-size: 12px;
+            color: #6b6c74;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+          }
+          .streak-badge {
+            font-weight: 700;
+            font-size: 13px;
+            color: #f0a020;
+          }
+          .streak-badge.no-streak {
+            font-weight: 400;
             color: #6b6c74;
           }
           input[type="checkbox"] {
@@ -251,12 +322,14 @@ function renderLoggedOutHomePage() {
 async function renderLoggedInHomePage(user) {
   const today = new Date();
   const dateLabel = today.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric' });
+  const { html: habitListHtml, doneCount, totalCount } = await renderHabitList(user.id);
 
   return wrapPage('My Habit Tracker', `
     <div class="topbar">Logged in as <strong>${user.username}</strong> | <a href="/logout">Log Out</a></div>
     <h1>My Habit Tracker</h1>
     <div class="date-label">${dateLabel}</div>
-    ${await renderHabitList(user.id)}
+    ${renderProgressRing(doneCount, totalCount)}
+    ${habitListHtml}
     <form class="inline" method="POST" action="/habits/add">
       <input type="text" name="name" placeholder="New habit name" required />
       <button type="submit">Add</button>
