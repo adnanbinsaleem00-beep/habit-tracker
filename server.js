@@ -22,9 +22,14 @@ async function setupDatabase() {
     CREATE TABLE IF NOT EXISTS habits (
       id SERIAL PRIMARY KEY,
       user_id INTEGER NOT NULL REFERENCES users(id),
-      name TEXT NOT NULL
+      name TEXT NOT NULL,
+      goal_count INTEGER NOT NULL DEFAULT 30,
+      goal_type TEXT NOT NULL DEFAULT 'streak'
     )
   `);
+
+  await pool.query(`ALTER TABLE habits ADD COLUMN IF NOT EXISTS goal_count INTEGER NOT NULL DEFAULT 30`);
+  await pool.query(`ALTER TABLE habits ADD COLUMN IF NOT EXISTS goal_type TEXT NOT NULL DEFAULT 'streak'`);
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS completions (
@@ -122,10 +127,18 @@ async function renderHabitList(userId) {
     const streakHtml = streak > 0
       ? `<span class="streak-badge">🔥 ${streak} day${streak === 1 ? '' : 's'} streak</span>`
       : `<span class="streak-badge no-streak">No streak yet</span>`;
+
+    const goalCount = habit.goal_count;
+    const goalType = habit.goal_type;
+    const goalProgress = goalType === 'total' ? Number(totalCount) : streak;
+    const goalFraction = goalCount > 0 ? Math.min(goalProgress / goalCount, 1) : 0;
+    const goalRingHtml = renderMiniGoalRing(habit.id, goalFraction, goalProgress, goalCount, goalType);
+
     return `
       <li class="habit" style="--accent: ${accent};">
         <label>
           <input type="checkbox" ${checked} onchange="toggleHabit(${habit.id})" />
+          ${goalRingHtml}
          <span class="habit-name" onclick="editHabitName(${habit.id}, '${habit.name.replace(/'/g, "\\'")}')">${habit.name}</span>
         </label>
         <div class="habit-meta">
@@ -133,29 +146,27 @@ async function renderHabitList(userId) {
           <button class="delete-btn" onclick="deleteHabit(${habit.id})">Delete</button>
         </div>
       </li>
-    `;  
+    `;
   }));
 
   return { html: `<ul class="habit-list">${rows.join('')}</ul>`, doneCount, totalCount: habits.length };
 }
 
-function renderProgressRing(doneCount, totalCount) {
-  const radius = 70;
+function renderMiniGoalRing(habitId, fraction, progress, goalCount, goalType) {
+  const radius = 14;
   const circumference = 2 * Math.PI * radius;
-  const fraction = totalCount > 0 ? doneCount / totalCount : 0;
   const offset = circumference * (1 - fraction);
+  const label = goalType === 'total' ? `${progress}/${goalCount} total` : `${progress}/${goalCount} day streak`;
 
   return `
-    <div class="progress-ring-wrap">
-      <svg width="180" height="180" viewBox="0 0 180 180">
-        <circle class="progress-ring-track" cx="90" cy="90" r="${radius}" />
-        <circle class="progress-ring-fill" cx="90" cy="90" r="${radius}"
-          stroke-dasharray="${circumference}"
-          stroke-dashoffset="${offset}" />
-      </svg>
-      <div class="progress-ring-label">${doneCount} / ${totalCount}</div>
-      <div class="progress-ring-sub">habits done today</div>
-    </div>
+    <svg class="mini-goal-ring" width="34" height="34" viewBox="0 0 34 34"
+      onclick="event.stopPropagation(); editHabitGoal(${habitId}, ${goalCount}, '${goalType}')"
+      title="Goal: ${label}. Click to edit.">
+      <circle class="mini-goal-track" cx="17" cy="17" r="${radius}" />
+      <circle class="mini-goal-fill" cx="17" cy="17" r="${radius}"
+        stroke-dasharray="${circumference}"
+        stroke-dashoffset="${offset}" />
+    </svg>
   `;
 }
 
@@ -255,6 +266,23 @@ function wrapPage(title, bodyHtml) {
             font-weight: 400;
             color: #6b6c74;
           }
+          .mini-goal-ring {
+            transform: rotate(-90deg);
+            cursor: pointer;
+            flex-shrink: 0;
+          }
+          .mini-goal-track {
+            fill: none;
+            stroke: #2a2b31;
+            stroke-width: 3;
+          }
+          .mini-goal-fill {
+            fill: none;
+            stroke: var(--accent, #6c5ce7);
+            stroke-width: 3;
+            stroke-linecap: round;
+            transition: stroke-dashoffset 0.4s ease;
+          }
           input[type="checkbox"] {
             width: 20px;
             height: 20px;
@@ -342,7 +370,8 @@ async function renderLoggedInHomePage(user) {
         if (confirm('Delete this habit? This cannot be undone.')) {
           fetch('/habits/delete/' + id, { method: 'POST' }).then(() => location.reload());
         }
-      }function editHabitName(id, currentName) {
+      }
+      function editHabitName(id, currentName) {
         const newName = prompt('Rename habit:', currentName);
         if (newName && newName.trim() && newName.trim() !== currentName) {
           fetch('/habits/rename/' + id, {
@@ -352,8 +381,49 @@ async function renderLoggedInHomePage(user) {
           }).then(() => location.reload());
         }
       }
+      function editHabitGoal(id, currentCount, currentType) {
+        const typeInput = prompt('Goal type: type "streak" for consecutive days, or "total" for total completions.', currentType);
+        if (!typeInput) return;
+        const type = typeInput.trim().toLowerCase();
+        if (type !== 'streak' && type !== 'total') {
+          alert('Please type either "streak" or "total".');
+          return;
+        }
+        const countInput = prompt('Goal number (e.g. 30):', currentCount);
+        if (!countInput) return;
+        const count = parseInt(countInput.trim(), 10);
+        if (!count || count <= 0) {
+          alert('Please enter a positive number.');
+          return;
+        }
+        fetch('/habits/goal/' + id, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'goal_count=' + encodeURIComponent(count) + '&goal_type=' + encodeURIComponent(type),
+        }).then(() => location.reload());
+      }
     </script>
   `);
+}
+
+function renderProgressRing(doneCount, totalCount) {
+  const radius = 70;
+  const circumference = 2 * Math.PI * radius;
+  const fraction = totalCount > 0 ? doneCount / totalCount : 0;
+  const offset = circumference * (1 - fraction);
+
+  return `
+    <div class="progress-ring-wrap">
+      <svg width="180" height="180" viewBox="0 0 180 180">
+        <circle class="progress-ring-track" cx="90" cy="90" r="${radius}" />
+        <circle class="progress-ring-fill" cx="90" cy="90" r="${radius}"
+          stroke-dasharray="${circumference}"
+          stroke-dashoffset="${offset}" />
+      </svg>
+      <div class="progress-ring-label">${doneCount} / ${totalCount}</div>
+      <div class="progress-ring-sub">habits done today</div>
+    </div>
+  `;
 }
 
 function renderSignupPage(error) {
@@ -461,6 +531,22 @@ const server = http.createServer(async (req, res) => {
       });
       return;
     }
+    if (req.method === 'POST' && url.pathname.startsWith('/habits/goal/')) {
+      const id = url.pathname.split('/habits/goal/')[1];
+      readFormData(req, async (params) => {
+        const goalCount = parseInt(params.get('goal_count'), 10);
+        const goalType = params.get('goal_type');
+        if (currentUser && goalCount > 0 && (goalType === 'streak' || goalType === 'total')) {
+          await pool.query(
+            'UPDATE habits SET goal_count = $1, goal_type = $2 WHERE id = $3 AND user_id = $4',
+            [goalCount, goalType, id, currentUser.id]
+          );
+        }
+        res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+        res.end('ok');
+      });
+      return;
+    }
     if (req.method === 'POST' && url.pathname.startsWith('/habits/delete/')) {
       const id = url.pathname.split('/habits/delete/')[1];
       if (currentUser) {
@@ -472,7 +558,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
     if (req.method === 'GET' && url.pathname === '/signup') {
-     res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
       res.end(renderSignupPage());
       return;
     }
@@ -482,7 +568,7 @@ const server = http.createServer(async (req, res) => {
         const newUsername = params.get('username');
         const password = params.get('password');
         if (!newUsername || !password) {
-         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+          res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
           res.end(renderSignupPage('Please fill in both fields.'));
           return;
         }
